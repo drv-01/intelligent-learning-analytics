@@ -2,19 +2,24 @@ import os
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
+from typing import List, TypedDict, Annotated
+import operator
 
 from pydantic import BaseModel, Field
-from typing import List
 
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_core.documents import Document
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.prebuilt import create_react_agent
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
 from langchain_core.tools import tool
 from langchain_community.vectorstores import Chroma
 
-# Global memory to act as in-memory session persistence
+from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
+
+# -----------------------------------
+# GLOBAL SESSION MEMORY (MemorySaver)
+# -----------------------------------
 agent_memory = MemorySaver()
 
 # -----------------------------------
@@ -30,7 +35,16 @@ class StructuredDiagnosisOutput(BaseModel):
     tutorials: List[str] = Field(description="Recommended tutorials and resources")
 
 # -----------------------------------
-# REAL CHROMA RAG SETUP
+# LANGGRAPH STATE DEFINITION
+# -----------------------------------
+class AgentState(TypedDict):
+    messages: Annotated[List[BaseMessage], operator.add]
+    reasoning_steps: List[str]
+    tool_results: List[str]
+    final_response: str
+
+# -----------------------------------
+# CHROMA RAG SETUP
 # -----------------------------------
 vector_store = None
 
@@ -38,91 +52,226 @@ def init_chroma_db():
     global vector_store
     if vector_store is not None:
         return
-    
-    # Check if API key is present for embeddings
     if not os.environ.get("GOOGLE_API_KEY"):
         return
-        
     embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
     docs = [
-        Document(page_content="Tutorial on Time Management: Use the Pomodoro technique for long study sessions.", metadata={"topic": "time management"}),
-        Document(page_content="Math Basics Tutorial: Focus on practicing algebra problems daily.", metadata={"topic": "mathematics"}),
-        Document(page_content="Effective Notes: The Cornell note-taking system enhances retention.", metadata={"topic": "note taking"}),
-        Document(page_content="Science Study Tips: Use spaced repetition flashcards for memorization.", metadata={"topic": "science"})
+        Document(page_content="Tutorial on Time Management: Use the Pomodoro technique — 25 min work / 5 min break — for long study sessions. Track productivity.", metadata={"topic": "time management"}),
+        Document(page_content="Mathematics Basics: Focus on algebra, geometry basics. Practice 15 problems daily and use Khan Academy for step-by-step walkthroughs.", metadata={"topic": "mathematics"}),
+        Document(page_content="Effective Notes Strategy: The Cornell note-taking system enhances retention. Divide page into cues, notes, and summary sections.", metadata={"topic": "note taking"}),
+        Document(page_content="Science Study Tips: Use spaced repetition and Anki flashcards for memorization. Review biology diagrams repeatedly.", metadata={"topic": "science"}),
+        Document(page_content="Attendance Improvement: Regular attendance improves understanding. Students with >85% attendance score 20% higher on average.", metadata={"topic": "attendance"}),
+        Document(page_content="Sleep & Cognition: Students who sleep 7-9 hours nightly retain 30% more information. Establish a fixed sleep schedule.", metadata={"topic": "sleep health"}),
+        Document(page_content="Study Planning: Create a weekly planner. Assign subject blocks, revision days, and mock test days. Use Google Calendar or Notion.", metadata={"topic": "study planning"}),
+        Document(page_content="At Risk Students: Provide structured mentorship, reduce distractions, and use shorter focused study sprints (15 min). Celebrate small wins.", metadata={"topic": "at risk intervention"}),
+        Document(page_content="High Performer Tips: Challenge yourself with competitive exam prep — Olympiads, JEE, SAT practice. Explore advanced topics.", metadata={"topic": "high performance"}),
+        Document(page_content="Assignment Completion: Break large assignments into smaller tasks using the tasks-first method. Use a Kanban board to track completion.", metadata={"topic": "assignments"}),
     ]
-    vector_store = Chroma.from_documents(documents=docs, embedding=embeddings, collection_name="local_tutorials")
+    vector_store = Chroma.from_documents(
+        documents=docs,
+        embedding=embeddings,
+        collection_name="study_coach_rag"
+    )
 
 # -----------------------------------
 # TOOLS
 # -----------------------------------
 @tool
+def web_search(query: str) -> str:
+    """Search the web for up-to-date educational information, learning resources, or study strategies."""
+    try:
+        search = DuckDuckGoSearchRun()
+        result = search.invoke(query)
+        return f"[Web Search Results for '{query}']:\n{result}"
+    except Exception as e:
+        return f"[Web Search Fallback for '{query}']: General educational resources and study tips are available at Khan Academy, Coursera, and YouTube EDU."
+
+@tool
 def fetch_tutorials(query: str) -> str:
-    """Fetch relevant learning tutorials and educational materials using Chroma DB RAG based on the query."""
+    """Retrieve relevant learning tutorials and educational materials from the internal RAG knowledge base."""
     init_chroma_db()
     if vector_store:
-        results = vector_store.similarity_search(query, k=2)
+        results = vector_store.similarity_search(query, k=3)
         if results:
-            return "\\n".join([f"RAG TUTORIAL CONTENT: {res.page_content}" for res in results])
-    return f"No specific RAG content found for topic '{query}'. Suggest general tutorials instead."
+            formatted = "\n".join([f"• {res.page_content}" for res in results])
+            return f"[RAG Tutorial Results for '{query}']:\n{formatted}"
+    return f"[RAG Fallback for '{query}']: Recommend general tutorials from Khan Academy, edX, or Coursera related to the topic."
 
 @tool
 def content_summarization(text: str) -> str:
-    """Summarize a large piece of learning content for the student."""
-    return f"[Summarized Content]: Extracting key insights... \\n{text[:150]}..."
-
-@tool
-def web_search(query: str) -> str:
-    """Search the web for up-to-date educational information or tools."""
-    try:
-        search = DuckDuckGoSearchRun()
-        return search.invoke(query)
-    except Exception:
-        return f"Web search results regarding {query}: General educational tips available online."
+    """Summarize a long text of educational content into a concise format for the student."""
+    sentences = text.split(". ")
+    key_points = sentences[:3]
+    return f"[Content Summary]:\n" + "\n".join([f"• {s.strip()}" for s in key_points if s.strip()])
 
 # -----------------------------------
-# AGENT SETUP
+# SYSTEM PROMPT
 # -----------------------------------
-SYSTEM_PROMPT = """You are an AI Study Coach for Intelligent Learning Analytics.
-Your task is to analyze the user's/student's performance, understand their goals, and provide structured, multi-step reasoned advice.
+SYSTEM_PROMPT = """You are an autonomous AI Study Coach embedded in an Intelligent Learning Analytics platform.
 
-You must follow chain-of-thought prompting:
-1. Understand the student's gaps based on Data/Analytics.
-2. Determine required external resources using tools (Web search, Content summarization, Tutorial retrieval).
-3. Draft a personalized plan.
+Your responsibilities:
+1. **Diagnose**: Analyze the student's learning gaps using the provided data/context via chain-of-thought reasoning.
+2. **Plan**: Create a personalized weekly study strategy tailored to the student's specific profile.
+3. **Retrieve**: Use your tools (web_search, fetch_tutorials, content_summarization) to find up-to-date educational resources.
+4. **Respond**: Output a structured coaching report in Markdown format.
 
-Finally, output the coaching response EXACTLY adhering to the requested structured format. Do not deviate. Provide the output in Markdown representing the underlying JSON-like structured data:
+Chain-of-Thought Process:
+- Step 1: Understand the student's current situation, weak areas, and goals.
+- Step 2: Identify what external resources would help using fetch_tutorials.
+- Step 3: If needed, search the web for current best practices using web_search.
+- Step 4: Summarize any long content using content_summarization.
+- Step 5: Compile a cohesive Diagnosis → Plan → Resources output.
 
-## Diagnosis
-(Your Learning gaps analysis)
+You MUST output the final coaching response in this EXACT Markdown structure:
 
-## Plan
-### Personalized strategy
-(Your detailed personalized study strategy)
+## 🔍 Diagnosis
+(Detailed learning gaps analysis based on the student's data)
 
-### Weekly goals
-- (Goal 1)
-- (Goal 2)
+## 📋 Plan
+### Personalized Strategy
+(Detailed, specific study strategy for this student)
 
-## Resources & Tutorials
-- (Tutorial or resource 1 fetched from tools)
-- (Tutorial or resource 2 fetched from tools)
+### Weekly Goals
+- Goal 1
+- Goal 2
+- Goal 3
+- Goal 4
+
+## 📚 Resources & Tutorials
+- Resource 1 (with description)
+- Resource 2 (with description)
+- Resource 3 (with description)
+
+## 💡 Coach's Insight
+(A motivating, personalized closing insight for the student)
 """
 
-def get_coach_agent():
-    # Load API key explicitly so we can safely check it
+# -----------------------------------
+# LANGGRAPH WORKFLOW NODES
+# -----------------------------------
+def reasoning_node(state: AgentState) -> AgentState:
+    """Chain-of-thought reasoning step: understand the student's context."""
     api_key = os.environ.get("GOOGLE_API_KEY")
     if not api_key:
-        raise ValueError("GOOGLE_API_KEY is not set in the .env file. Please add it to use the AI Coach.")
-        
-    # Initialize Chroma lazily after key is set
+        raise ValueError("GOOGLE_API_KEY is not set.")
+    
+    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3)
+    
+    # Build chain-of-thought reasoning prompt
+    cot_prompt = f"""You are analyzing a student's academic situation. 
+Think step-by-step about:
+1. What are the likely learning gaps?
+2. What subjects or skills need improvement?
+3. What intervention strategies are most appropriate?
+4. What resources should we look for?
+
+Student context: {state['messages'][-1].content}
+
+Provide a brief reasoning chain (3-5 bullet points)."""
+    
+    reasoning_response = llm.invoke([HumanMessage(content=cot_prompt)])
+    reasoning_steps = reasoning_response.content.split("\n")
+    reasoning_steps = [s.strip() for s in reasoning_steps if s.strip()]
+    
+    return {
+        "messages": state["messages"],
+        "reasoning_steps": reasoning_steps,
+        "tool_results": state.get("tool_results", []),
+        "final_response": state.get("final_response", "")
+    }
+
+def tool_retrieval_node(state: AgentState) -> AgentState:
+    """Retrieve tutorials from RAG and optionally web search."""
     init_chroma_db()
+    tool_results = []
+    
+    # Extract student context for tool calls
+    student_context = state["messages"][-1].content
+    
+    # Always fetch from RAG
+    rag_result = fetch_tutorials.invoke(student_context[:200])
+    tool_results.append(rag_result)
+    
+    # Web search for supplementary resources
+    search_query = f"best study strategies and tutorials for {student_context[:100]}"
+    web_result = web_search.invoke(search_query)
+    tool_results.append(web_result)
+    
+    return {
+        "messages": state["messages"],
+        "reasoning_steps": state.get("reasoning_steps", []),
+        "tool_results": tool_results,
+        "final_response": state.get("final_response", "")
+    }
+
+def response_generation_node(state: AgentState) -> AgentState:
+    """Generate the final structured coaching response."""
+    api_key = os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        raise ValueError("GOOGLE_API_KEY is not set.")
     
     llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.7)
-    tools = [web_search, fetch_tutorials, content_summarization]
     
-    agent_executor = create_react_agent(
-        llm, 
-        tools, 
-        checkpointer=agent_memory,
-    )
-    return agent_executor
+    reasoning_context = "\n".join(state.get("reasoning_steps", []))
+    tool_context = "\n\n".join(state.get("tool_results", []))
+    
+    full_prompt = f"""Based on the following:
+
+STUDENT CONTEXT:
+{state['messages'][-1].content}
+
+CHAIN-OF-THOUGHT REASONING:
+{reasoning_context}
+
+RETRIEVED RESOURCES (RAG + Web):
+{tool_context}
+
+Now produce the final structured coaching response following the system prompt format exactly."""
+
+    messages = [
+        SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(content=full_prompt)
+    ]
+    
+    response = llm.invoke(messages)
+    final_response = response.content
+    
+    return {
+        "messages": state["messages"] + [AIMessage(content=final_response)],
+        "reasoning_steps": state.get("reasoning_steps", []),
+        "tool_results": state.get("tool_results", []),
+        "final_response": final_response
+    }
+
+# -----------------------------------
+# BUILD LANGGRAPH WORKFLOW
+# -----------------------------------
+def build_coach_graph():
+    workflow = StateGraph(AgentState)
+    
+    workflow.add_node("reasoning", reasoning_node)
+    workflow.add_node("tool_retrieval", tool_retrieval_node)
+    workflow.add_node("response_generation", response_generation_node)
+    
+    workflow.set_entry_point("reasoning")
+    workflow.add_edge("reasoning", "tool_retrieval")
+    workflow.add_edge("tool_retrieval", "response_generation")
+    workflow.add_edge("response_generation", END)
+    
+    return workflow.compile(checkpointer=agent_memory)
+
+# -----------------------------------
+# PUBLIC API: get_coach_agent()
+# -----------------------------------
+_graph = None
+
+def get_coach_agent():
+    """Returns compiled LangGraph agent with MemorySaver for session persistence."""
+    api_key = os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        raise ValueError("GOOGLE_API_KEY is not set in .env. Please add it to use the AI Coach.")
+    global _graph
+    if _graph is None:
+        init_chroma_db()
+        _graph = build_coach_graph()
+    return _graph
