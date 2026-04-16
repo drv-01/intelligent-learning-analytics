@@ -4,3 +4,11 @@ matplotlib
 scikit-learn
 joblib
 numpy
+langchain
+langchain-google-genai
+langchain-community
+langgraph
+chromadb
+duckduckgo-search
+python-dotenv
+pydantic
