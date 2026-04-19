@@ -54,7 +54,7 @@ def init_chroma_db():
         return
     if not os.environ.get("GOOGLE_API_KEY"):
         return
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
     docs = [
         Document(page_content="Tutorial on Time Management: Use the Pomodoro technique — 25 min work / 5 min break — for long study sessions. Track productivity.", metadata={"topic": "time management"}),
         Document(page_content="Mathematics Basics: Focus on algebra, geometry basics. Practice 15 problems daily and use Khan Academy for step-by-step walkthroughs.", metadata={"topic": "mathematics"}),
@@ -100,6 +100,8 @@ def fetch_tutorials(query: str) -> str:
 @tool
 def content_summarization(text: str) -> str:
     """Summarize a long text of educational content into a concise format for the student."""
+    if isinstance(text, list):
+        text = "\n".join([str(t) for t in text])
     sentences = text.split(". ")
     key_points = sentences[:3]
     return f"[Content Summary]:\n" + "\n".join([f"• {s.strip()}" for s in key_points if s.strip()])
@@ -155,7 +157,7 @@ def reasoning_node(state: AgentState) -> AgentState:
     if not api_key:
         raise ValueError("GOOGLE_API_KEY is not set.")
     
-    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3)
+    llm = ChatGoogleGenerativeAI(model="gemini-3-flash-preview", temperature=0.3)
     
     # Build chain-of-thought reasoning prompt
     cot_prompt = f"""You are analyzing a student's academic situation. 
@@ -170,7 +172,10 @@ Student context: {state['messages'][-1].content}
 Provide a brief reasoning chain (3-5 bullet points)."""
     
     reasoning_response = llm.invoke([HumanMessage(content=cot_prompt)])
-    reasoning_steps = reasoning_response.content.split("\n")
+    res_content = reasoning_response.content
+    if isinstance(res_content, list):
+        res_content = "\n".join([c.get("text", "") if isinstance(c, dict) else str(c) for c in res_content])
+    reasoning_steps = res_content.split("\n")
     reasoning_steps = [s.strip() for s in reasoning_steps if s.strip()]
     
     return {
@@ -195,7 +200,13 @@ def tool_retrieval_node(state: AgentState) -> AgentState:
     # Web search for supplementary resources
     search_query = f"best study strategies and tutorials for {student_context[:100]}"
     web_result = web_search.invoke(search_query)
-    tool_results.append(web_result)
+    
+    # Use summarization tool if web result is very long (Requirement satisfaction)
+    if len(web_result) > 500:
+        summarized_web = content_summarization.invoke(web_result)
+        tool_results.append(summarized_web)
+    else:
+        tool_results.append(web_result)
     
     return {
         "messages": state["messages"],
@@ -210,7 +221,7 @@ def response_generation_node(state: AgentState) -> AgentState:
     if not api_key:
         raise ValueError("GOOGLE_API_KEY is not set.")
     
-    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.7)
+    llm = ChatGoogleGenerativeAI(model="gemini-3-flash-preview", temperature=0.7)
     
     reasoning_context = "\n".join(state.get("reasoning_steps", []))
     tool_context = "\n\n".join(state.get("tool_results", []))
@@ -235,6 +246,8 @@ Now produce the final structured coaching response following the system prompt f
     
     response = llm.invoke(messages)
     final_response = response.content
+    if isinstance(final_response, list):
+        final_response = "\n".join([c.get("text", "") if isinstance(c, dict) else str(c) for c in final_response])
     
     return {
         "messages": state["messages"] + [AIMessage(content=final_response)],

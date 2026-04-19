@@ -1,4 +1,5 @@
 import streamlit as st
+import os
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
@@ -244,6 +245,23 @@ REQUIRED_COLUMNS = [
 ]
 
 # ─────────────────────────────────────────
+# PERSISTENT DATA HELPERS (NEW)
+# ─────────────────────────────────────────
+UPLOAD_PATH = "data/uploaded_student_data.csv"
+
+def save_uploaded_data(df):
+    df.to_csv(UPLOAD_PATH, index=False)
+
+def load_persisted_data():
+    if os.path.exists(UPLOAD_PATH):
+        try:
+            return pd.read_csv(UPLOAD_PATH)
+        except Exception:
+            return None
+    return None
+
+
+# ─────────────────────────────────────────
 # MATPLOTLIB DARK THEME HELPER
 # ─────────────────────────────────────────
 def apply_dark_style(fig, ax):
@@ -279,14 +297,8 @@ with st.sidebar:
     st.divider()
     
     st.markdown("""
-    <div style='font-size:0.75rem; color:#475569; padding: 0.5rem 0;'>
-        <div style='margin-bottom:0.5rem; font-weight:600; color:#64748b;'>TECH STACK</div>
-        <div style='margin:0.3rem 0;'>🔗 LangGraph (Workflow)</div>
-        <div style='margin:0.3rem 0;'>🧠 Gemini 1.5 Flash (LLM)</div>
-        <div style='margin:0.3rem 0;'>📦 ChromaDB (RAG)</div>
-        <div style='margin:0.3rem 0;'>💾 MemorySaver (Session)</div>
-        <div style='margin:0.3rem 0;'>🔍 DuckDuckGo (Web)</div>
-        <div style='margin:0.3rem 0;'>🤖 Chain-of-Thought</div>
+    <div style='font-size:0.75rem; color:#475569; padding: 0.5rem 0; text-align:center;'>
+        Built with ❤️ for Educational Excellence
     </div>
     """, unsafe_allow_html=True)
 
@@ -302,6 +314,13 @@ if app_mode == "📊 Batch Analytics":
     </div>
     """, unsafe_allow_html=True)
 
+    # Initialize session state from disk if not already set
+    if "uploaded_df" not in st.session_state:
+        persisted = load_persisted_data()
+        if persisted is not None:
+            st.session_state["uploaded_df"] = persisted
+
+
     uploaded_file = st.file_uploader(
         "Upload Student Dataset (CSV)",
         type=["csv"],
@@ -310,6 +329,10 @@ if app_mode == "📊 Batch Analytics":
 
     if uploaded_file is not None:
         df = pd.read_csv(uploaded_file)
+        st.session_state["uploaded_df"] = df
+        save_uploaded_data(df)
+        st.success(f"✅ Dataset saved successfully to {UPLOAD_PATH}")
+
         
         # ── Dataset Preview
         st.markdown("<div class='section-header'><h3>📄 Dataset Preview</h3></div>", unsafe_allow_html=True)
@@ -527,23 +550,34 @@ elif app_mode == "🤖 AI Coach":
     </div>
     """, unsafe_allow_html=True)
 
-    # Tech pipeline info
-    col_info1, col_info2, col_info3, col_info4 = st.columns(4)
-    for col, icon, label, sub in [
-        (col_info1, "🔗", "LangGraph", "Multi-step workflow"),
-        (col_info2, "🧠", "Chain-of-Thought", "Structured reasoning"),
-        (col_info3, "📦", "ChromaDB RAG", "Tutorial retrieval"),
-        (col_info4, "🌐", "Web Search", "Live resources"),
-    ]:
-        col.markdown(f"""
-        <div class='metric-card' style='padding:1rem;'>
-            <div style='font-size:1.6rem;'>{icon}</div>
-            <div style='font-weight:700; color:#e2e8f0; font-size:0.9rem; margin-top:0.3rem;'>{label}</div>
-            <div style='color:#64748b; font-size:0.75rem;'>{sub}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
     st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── STUDENT DATA SELECTOR (NEW)
+    selected_student_context = ""
+    if "uploaded_df" in st.session_state:
+        df = st.session_state["uploaded_df"]
+        st.markdown("<div class='section-header'><h3>📋 Select Student for Diagnosis</h3></div>", unsafe_allow_html=True)
+        
+        # Use StudentID if exists, otherwise use Index
+        id_col = "StudentID" if "StudentID" in df.columns else None
+        student_options = [(i, f"Student {df.loc[i, id_col]}" if id_col else f"Student {i}") for i in df.index]
+        
+        selected_idx = st.selectbox(
+            "Which student should the Coach analyze?",
+            options=[opt[0] for opt in student_options],
+            format_func=lambda x: dict(student_options)[x],
+            help="Select a student from the uploaded dataset for personalized coaching."
+        )
+        
+        if selected_idx is not None:
+            student_data = df.loc[selected_idx].to_dict()
+            selected_student_context = f"\n\nCURRENT STUDENT DATA:\n{str(student_data)}"
+            
+            with st.expander("🔍 View Selected Student Data"):
+                st.json(student_data)
+    else:
+        st.info("💡 Tip: Upload a dataset in the **Batch Analytics** tab to analyze specific students.")
+
 
     # ── SESSION STATE INIT
     if "messages" not in st.session_state:
@@ -599,7 +633,7 @@ elif app_mode == "🤖 AI Coach":
                     
                     response = agent.invoke(
                         {
-                            "messages": [HumanMessage(content=prompt)],
+                            "messages": [HumanMessage(content=prompt + selected_student_context)],
                             "reasoning_steps": [],
                             "tool_results": [],
                             "final_response": ""
@@ -634,6 +668,8 @@ elif app_mode == "🤖 AI Coach":
                     }
                     
                     current_section = None
+                    if isinstance(final_output, list):
+                        final_output = "\n".join([c.get("text", "") if isinstance(c, dict) else str(c) for c in final_output])
                     lines = final_output.split("\n")
                     buffer = []
                     
@@ -727,7 +763,6 @@ elif app_mode == "🤖 AI Coach":
 # TAB 3: SESSION MEMORY PANEL
 # ─────────────────────────────────────────
 elif app_mode == "🧠 Session Memory":
-    
     st.markdown("""
     <div class='main-header'>
         <h1>🧠 Session Memory & Progress Tracker</h1>

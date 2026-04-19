@@ -9,9 +9,9 @@ def run_test():
         print("Agent initialized successfully.")
         
         # Checking if API key is actually set
-        api_key = os.environ.get("OPENAI_API_KEY")
+        api_key = os.environ.get("GOOGLE_API_KEY")
         if not api_key:
-            print("WARNING: OPENAI_API_KEY is not set in environment or .env file. The agent will likely fail during invocation.")
+            print("WARNING: GOOGLE_API_KEY is not set in environment or .env file. The agent will likely fail during invocation.")
             return
 
         print("Testing agent invocation...")

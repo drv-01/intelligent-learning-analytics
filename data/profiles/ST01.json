@@ -1,0 +1,1 @@
+{"name": "ST01", "total_sessions": 0, "ml_prediction": "Average", "latest_scores": {"Linear Regression": 50, "Clustering": 50, "Neural Networks": 50, "Pandas/NumPy": 50, "Evaluation": 50}, "learning_gaps": [], "goal": "Pass end-sem exam", "weeks_left": 4, "sessions": []}
