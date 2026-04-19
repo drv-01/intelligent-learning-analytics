@@ -283,9 +283,9 @@ _graph = None
 
 def get_coach_agent():
     """Returns compiled LangGraph agent with MemorySaver for session persistence."""
-    api_key = os.environ.get("GOOGLE_API_KEY")
+    api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
-        raise ValueError("GOOGLE_API_KEY is not set in .env. Please add it to use the AI Coach.")
+        raise ValueError("GROQ_API_KEY is not set in .env. Please add it to use the AI Coach.")
     global _graph
     if _graph is None:
         init_chroma_db()

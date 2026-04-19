@@ -13,3 +13,4 @@ duckduckgo-search
 python-dotenv
 pydantic
 langchain-core
+langchain-groq
