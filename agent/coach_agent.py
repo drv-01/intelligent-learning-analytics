@@ -7,13 +7,11 @@ import operator
 
 from pydantic import BaseModel, Field
 
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_groq import ChatGroq
 from langchain_community.tools import DuckDuckGoSearchRun
-from langchain_core.documents import Document
+
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
 from langchain_core.tools import tool
-from langchain_community.vectorstores import Chroma
-
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -44,34 +42,24 @@ class AgentState(TypedDict):
     final_response: str
 
 # -----------------------------------
-# CHROMA RAG SETUP
+# KNOWLEDGE BASE (Local)
 # -----------------------------------
-vector_store = None
+KNOWLEDGE_BASE = [
+    "Tutorial on Time Management: Use the Pomodoro technique — 25 min work / 5 min break — for long study sessions. Track productivity.",
+    "Mathematics Basics: Focus on algebra, geometry basics. Practice 15 problems daily and use Khan Academy for step-by-step walkthroughs.",
+    "Effective Notes Strategy: The Cornell note-taking system enhances retention. Divide page into cues, notes, and summary sections.",
+    "Science Study Tips: Use spaced repetition and Anki flashcards for memorization. Review biology diagrams repeatedly.",
+    "Attendance Improvement: Regular attendance improves understanding. Students with >85% attendance score 20% higher on average.",
+    "Sleep & Cognition: Students who sleep 7-9 hours nightly retain 30% more information. Establish a fixed sleep schedule.",
+    "Study Planning: Create a weekly planner. Assign subject blocks, revision days, and mock test days. Use Google Calendar or Notion.",
+    "At Risk Students: Provide structured mentorship, reduce distractions, and use shorter focused study sprints (15 min). Celebrate small wins.",
+    "High Performer Tips: Challenge yourself with competitive exam prep — Olympiads, JEE, SAT practice. Explore advanced topics.",
+    "Assignment Completion: Break large assignments into smaller tasks using the tasks-first method. Use a Kanban board to track completion.",
+]
 
 def init_chroma_db():
-    global vector_store
-    if vector_store is not None:
-        return
-    if not os.environ.get("GOOGLE_API_KEY"):
-        return
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
-    docs = [
-        Document(page_content="Tutorial on Time Management: Use the Pomodoro technique — 25 min work / 5 min break — for long study sessions. Track productivity.", metadata={"topic": "time management"}),
-        Document(page_content="Mathematics Basics: Focus on algebra, geometry basics. Practice 15 problems daily and use Khan Academy for step-by-step walkthroughs.", metadata={"topic": "mathematics"}),
-        Document(page_content="Effective Notes Strategy: The Cornell note-taking system enhances retention. Divide page into cues, notes, and summary sections.", metadata={"topic": "note taking"}),
-        Document(page_content="Science Study Tips: Use spaced repetition and Anki flashcards for memorization. Review biology diagrams repeatedly.", metadata={"topic": "science"}),
-        Document(page_content="Attendance Improvement: Regular attendance improves understanding. Students with >85% attendance score 20% higher on average.", metadata={"topic": "attendance"}),
-        Document(page_content="Sleep & Cognition: Students who sleep 7-9 hours nightly retain 30% more information. Establish a fixed sleep schedule.", metadata={"topic": "sleep health"}),
-        Document(page_content="Study Planning: Create a weekly planner. Assign subject blocks, revision days, and mock test days. Use Google Calendar or Notion.", metadata={"topic": "study planning"}),
-        Document(page_content="At Risk Students: Provide structured mentorship, reduce distractions, and use shorter focused study sprints (15 min). Celebrate small wins.", metadata={"topic": "at risk intervention"}),
-        Document(page_content="High Performer Tips: Challenge yourself with competitive exam prep — Olympiads, JEE, SAT practice. Explore advanced topics.", metadata={"topic": "high performance"}),
-        Document(page_content="Assignment Completion: Break large assignments into smaller tasks using the tasks-first method. Use a Kanban board to track completion.", metadata={"topic": "assignments"}),
-    ]
-    vector_store = Chroma.from_documents(
-        documents=docs,
-        embedding=embeddings,
-        collection_name="study_coach_rag"
-    )
+    pass # No longer needed, keeping for compatibility if referenced elsewhere
+
 
 # -----------------------------------
 # TOOLS
@@ -88,14 +76,25 @@ def web_search(query: str) -> str:
 
 @tool
 def fetch_tutorials(query: str) -> str:
-    """Retrieve relevant learning tutorials and educational materials from the internal RAG knowledge base."""
-    init_chroma_db()
-    if vector_store:
-        results = vector_store.similarity_search(query, k=3)
-        if results:
-            formatted = "\n".join([f"• {res.page_content}" for res in results])
-            return f"[RAG Tutorial Results for '{query}']:\n{formatted}"
-    return f"[RAG Fallback for '{query}']: Recommend general tutorials from Khan Academy, edX, or Coursera related to the topic."
+    """Retrieve relevant learning tutorials and educational materials from the internal knowledge base."""
+    query_words = set(query.lower().split())
+    results = []
+    
+    for doc in KNOWLEDGE_BASE:
+        doc_words = set(doc.lower().split())
+        overlap = len(query_words.intersection(doc_words))
+        if overlap > 0:
+            results.append((overlap, doc))
+    
+    # Sort by overlap score
+    results.sort(key=lambda x: x[0], reverse=True)
+    top_matches = results[:3]
+    
+    if top_matches:
+        formatted = "\n".join([f"• {res[1]}" for res in top_matches])
+        return f"[Knowledge Base Results for '{query}']:\n{formatted}"
+    
+    return f"[Logic Fallback]: Recommend general tutorials from Khan Academy or Coursera related to the topic."
 
 @tool
 def content_summarization(text: str) -> str:
@@ -153,11 +152,13 @@ You MUST output the final coaching response in this EXACT Markdown structure:
 # -----------------------------------
 def reasoning_node(state: AgentState) -> AgentState:
     """Chain-of-thought reasoning step: understand the student's context."""
-    api_key = os.environ.get("GOOGLE_API_KEY")
+    from dotenv import load_dotenv
+    load_dotenv(override=True)
+    api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
-        raise ValueError("GOOGLE_API_KEY is not set.")
+        raise ValueError("GROQ_API_KEY is not set.")
     
-    llm = ChatGoogleGenerativeAI(model="gemini-3-flash-preview", temperature=0.3)
+    llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0.3, groq_api_key=api_key)
     
     # Build chain-of-thought reasoning prompt
     cot_prompt = f"""You are analyzing a student's academic situation. 
@@ -217,11 +218,13 @@ def tool_retrieval_node(state: AgentState) -> AgentState:
 
 def response_generation_node(state: AgentState) -> AgentState:
     """Generate the final structured coaching response."""
-    api_key = os.environ.get("GOOGLE_API_KEY")
+    from dotenv import load_dotenv
+    load_dotenv(override=True)
+    api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
-        raise ValueError("GOOGLE_API_KEY is not set.")
+        raise ValueError("GROQ_API_KEY is not set.")
     
-    llm = ChatGoogleGenerativeAI(model="gemini-3-flash-preview", temperature=0.7)
+    llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0.7, groq_api_key=api_key)
     
     reasoning_context = "\n".join(state.get("reasoning_steps", []))
     tool_context = "\n\n".join(state.get("tool_results", []))
